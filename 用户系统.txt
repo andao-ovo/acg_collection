@@ -1,0 +1,82 @@
+第一课：用户系统要做什么？
+一个完整的用户系统，核心是认证（Authentication）和授权（Authorization）：
+
+注册：用户提交用户名 + 密码，我们存到数据库
+密码加密：不能明文存密码，要用 bcrypt 加密
+登录：用户提交用户名 + 密码，验证通过后返回一个 token
+用 token 保护接口：某些接口需要登录才能访问
+核心概念：JWT（JSON Web Token）
+
+JWT 是什么？ 它是一个"令牌"，用户登录成功后，服务器发给他一个 token。之后用户每次请求，带上这个 token，服务器就知道"你是谁"。
+
+类比： JWT 就像一张"通行证"。你登录后拿到通行证，之后进每个房间（访问接口）都要出示通行证。
+
+第二课：需要装什么库？
+加用户系统，需要装两个库：
+
+Bash
+pip install passlib bcrypt python-jose
+passlib + bcrypt：用来加密密码
+python-jose：用来生成和验证 JWT
+第三课：先建用户表（models.py）
+第一步：在 models.py 里加一个 User 模型。
+
+Python
+from sqlalchemy import Column, Integer, String, DateTime
+from datetime import datetime
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)   # 用户名，唯一
+    password = Column(String)                            # 密码（加密后）
+    created_at = Column(DateTime, default=datetime.now)
+关键点：
+
+username 加 unique=True —— 用户名不能重复
+password 存的是加密后的密码，不是明文
+第四课：密码加密（核心概念）
+为什么不能明文存密码？ 因为如果数据库泄露，用户的密码就全暴露了。所以要用 bcrypt 加密。
+
+加密和"哈希"的区别：
+
+加密：可以解密（有密钥）
+哈希：不可逆（无法还原）
+密码用"哈希"，因为不需要还原，只需要验证。
+
+Python
+from passlib.context import CryptContext
+# 创建密码加密工具
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 加密密码
+hashed = pwd_context.hash("mypassword")   # 加密
+print(hashed)   # $2b$12$...（一串乱码）
+# 验证密码
+pwd_context.verify("mypassword", hashed)   # True（密码正确）
+pwd_context.verify("wrong", hashed)        # False（密码错误）
+关键点：
+
+pwd_context.hash(password) —— 加密密码
+pwd_context.verify(password, hashed) —— 验证密码是否正确
+第五课：JWT 生成和验证（核心概念）
+JWT 是一个字符串，里面包含用户信息，服务器用密钥签名。
+
+Python
+from jose import jwt
+from datetime import datetime, timedelta
+# 密钥（生产环境要用复杂的）
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+# 生成 token
+def create_token(user_id: int):
+    expire = datetime.utcnow() + timedelta(minutes=30)   # 30 分钟后过期
+    payload = {"sub": str(user_id), "exp": expire}       # 用户 id + 过期时间
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return token
+# 验证 token
+def verify_token(token: str):
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    return payload["sub"]   # 返回用户 id
+关键点：
+
+jwt.encode(payload, SECRET_KEY, algorithm) —— 生成 token
+jwt.decode(token, SECRET_KEY, algorithms) —— 验证 token，取出用户信息
