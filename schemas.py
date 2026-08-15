@@ -17,5 +17,4 @@ class WorkOut(WorkCreate):
     id: int
     created_at: datetime
 
-    class Config:
-        orm_mode = True  #允许从SQLAlchemy模型自动转换
+    model_config = {"from_attributes": True}  #允许从SQLAlchemy模型自动转换(Pydantic v2)
