@@ -123,6 +123,32 @@ def get_work(
 
     return work_query.all()
 
+# ---------- 随机推荐（不需要认证）----------
+# 注意:固定路径接口必须定义在 /works/{work_id} 之前,否则会被当成 work_id 拦截
+@app.get("/works/random", response_model=WorkOut)
+def random_work(db: Session = Depends(get_db)):
+    work = db.query(Work).order_by(func.random()).first()
+    if not work:
+        raise HTTPException(status_code=404, detail="No works found")
+    return work
+
+# ---------- 统计（不需要认证）----------
+@app.get("/works/stats")
+def get_stats(db: Session = Depends(get_db)):
+    cached = r.get("works_stats")
+    if cached:
+        return json.loads(cached)
+    total = db.query(func.count(Work.id)).scalar()
+    avg_rating = db.query(func.avg(Work.rating)).scalar()
+    type_counts = db.query(Work.type, func.count(Work.id)).group_by(Work.type).all()
+    result = {
+        "total": total,
+        "avg_rating": avg_rating,
+        "type_breakdown": dict(type_counts)
+    }
+    r.setex("works_stats", 300, json.dumps(result))
+    return result
+
 # ---------- 查询单个作品（不需要认证）----------
 @app.get("/works/{work_id}", response_model=WorkOut)
 def get_work_by_id(work_id: int, db: Session = Depends(get_db)):
@@ -162,8 +188,16 @@ def add_tag(
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
 
-    work_tag = WorkTag(work_id=work_id, tag_id=tag_id)
-    db.add(work_tag)
+    # 防止重复添加同一标签（WorkTag 上已有 (work_id, tag_id) 唯一约束兜底）
+    existing = (
+        db.query(WorkTag)
+        .filter(WorkTag.work_id == work_id, WorkTag.tag_id == tag_id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="该标签已在此作品上，无需重复添加")
+
+    db.add(WorkTag(work_id=work_id, tag_id=tag_id))
     db.commit()
     r.delete(f"work:{work_id}:tags")
     return {"message": "标签添加成功"}
@@ -242,27 +276,3 @@ def delete_work(
     r.delete("works_stats")
     return {"ok": True}
 
-# ---------- 随机推荐（不需要认证）----------
-@app.get("/works/random", response_model=WorkOut)
-def random_work(db: Session = Depends(get_db)):
-    work = db.query(Work).order_by(func.random()).first()
-    if not work:
-        raise HTTPException(status_code=404, detail="No works found")
-    return work
-
-# ---------- 统计（不需要认证）----------
-@app.get("/works/stats")
-def get_stats(db: Session = Depends(get_db)):
-    cached = r.get("works_stats")
-    if cached:
-        return json.loads(cached)
-    total = db.query(func.count(Work.id)).scalar()
-    avg_rating = db.query(func.avg(Work.rating)).scalar()
-    type_counts = db.query(Work.type, func.count(Work.id)).group_by(Work.type).all()
-    result = {
-        "total": total,
-        "avg_rating": avg_rating,
-        "type_breakdown": dict(type_counts)
-    }
-    r.setex("works_stats", 300, json.dumps(result))
-    return result

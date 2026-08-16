@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint
 from database import Base
 from datetime import datetime
 
@@ -21,6 +21,7 @@ class Tag(Base):
 
 class WorkTag(Base):
     __tablename__ = "work_tags"
+    __table_args__ = (UniqueConstraint("work_id", "tag_id", name="uq_work_tag"),)
     id = Column(Integer, primary_key=True, index=True)
     work_id = Column(Integer, ForeignKey("works.id"), nullable=False)
     tag_id = Column(Integer, ForeignKey("tags.id"), nullable=False)

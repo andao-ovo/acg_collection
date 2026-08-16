@@ -12,7 +12,7 @@ set "ROOT=%~dp0.."
 REM ---------- 1. 启动 Redis ----------
 echo [1/4] 检查 Redis...
 tasklist /FI "IMAGENAME eq redis-server.exe" 2>nul | find /I "redis-server.exe" >nul
-if %errorlevel%==0 (
+if not errorlevel 1 (
     echo        Redis 已在运行,跳过启动
 ) else (
     echo        启动 Redis...
@@ -23,8 +23,9 @@ echo.
 
 REM ---------- 2. 启动后端 ----------
 echo [2/4] 启动后端 (FastAPI)...
-cd /d "%ROOT%"
+pushd "%ROOT%"
 start "ACG后端" cmd /c "call venv\Scripts\activate && uvicorn main:app --reload --port 8000"
+popd
 echo        后端已在新的窗口启动
 echo.
 
@@ -34,21 +35,24 @@ timeout /t 4 /nobreak >nul
 
 echo.
 
-REM ---------- 3. 安装前端依赖（如需要） ----------
+REM ---------- 3. 检查前端依赖 ----------
 echo [3/4] 检查前端依赖...
-cd /d "%ROOT%\frontend"
+pushd "%ROOT%\frontend"
 if not exist node_modules (
-    echo        检测到未安装依赖,正在安装 npm install（首次较慢）...
+    echo        检测到未安装依赖,正在安装 npm install(首次较慢)...
     call npm install
 ) else (
     echo        依赖已就绪,跳过安装
 )
+popd
 
 echo.
 
 REM ---------- 4. 启动前端 ----------
 echo [4/4] 启动前端 (Vite)...
-start "ACG前端" cmd /c "cd /d ""%ROOT%\frontend"" && npm run dev"
+pushd "%ROOT%\frontend"
+start "ACG前端" cmd /c "npm run dev"
+popd
 
 echo.
 echo ============================================
