@@ -1,0 +1,8 @@
+node_modules
+
+# dist 故意纳入版本控制：这样 clone 仓库的人不需要装 Node.js 就能直接打开页面。
+# 重新构建前端之后，记得把 frontend/dist 的改动一起提交。
+# dist
+
+*.local
+.DS_Store

@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+acg.db
+.env
+DEV_NOTES.md

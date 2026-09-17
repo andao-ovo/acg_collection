@@ -1,0 +1,22 @@
+# ACG收藏馆 后端依赖
+# 安装： pip install -r requirements.txt
+# 实测环境： Python 3.14
+
+# Web 框架
+fastapi==0.141.1
+uvicorn==0.52.3
+
+# 数据库（ORM）—— 数据库本身用 Python 内置的 sqlite3，无需额外安装
+SQLAlchemy==2.0.52
+
+# 数据校验
+pydantic==2.13.4
+
+# 认证（JWT + 密码哈希）
+bcrypt==5.0.0
+python-jose==3.5.0
+
+# 缓存 —— 可选依赖：
+# 装了之后统计/标签接口会缓存 5 分钟；即使没有运行 Redis 服务端，
+# 项目也会自动降级为直连数据库，功能完全不受影响。
+redis==8.1.0
