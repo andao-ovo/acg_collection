@@ -24,6 +24,10 @@
 
 ![登录后界面](docs/screenshots/05-logged-in.png)
 
+**我的收藏** —— 列表页按「全部作品 / 我的收藏 / 我上传的」切换视角
+
+![我的收藏](docs/screenshots/06-my-favorites.png)
+
 **登录 / 注册**
 
 ![登录页](docs/screenshots/04-login.png)
