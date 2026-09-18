@@ -3,7 +3,16 @@ export const WORK_TYPES = {
   小说: { label: '小说', color: '#f56c6c', icon: 'Notebook' },
   漫画: { label: '漫画', color: '#409eff', icon: 'Picture' },
   动漫: { label: '动漫', color: '#67c23a', icon: 'Film' },
+  电影: { label: '电影', color: '#e6a23c', icon: 'VideoCamera' },
+  电视剧: { label: '电视剧', color: '#9b59b6', icon: 'Monitor' },
 }
+
+// 作品可见范围：决定列表页展示哪一批作品
+export const SCOPE_OPTIONS = [
+  { label: '全部作品', value: 'all' },
+  { label: '我的收藏', value: 'favorites' },
+  { label: '我上传的', value: 'mine' },
+]
 
 export const WORK_TYPE_OPTIONS = Object.entries(WORK_TYPES).map(
   ([value, { label }]) => ({ label, value })

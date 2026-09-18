@@ -1,8 +1,8 @@
 # ACG 收藏馆
 
-动漫 / 漫画 / 小说的收藏与评价系统，**前后端全栈实现**：Vue 3 + Element Plus 前端，FastAPI + SQLAlchemy 后端，Redis 作为可选缓存。
+动漫 / 漫画 / 小说 / 影视的收藏与评价系统，**前后端全栈实现**：Vue 3 + Element Plus 前端，FastAPI + SQLAlchemy 后端，Redis 作为可选缓存。
 
-支持 JWT 登录、作品增删改查、多对多标签、条件筛选与动态排序、统计图表，共 14 个 REST 接口 + 4 个页面。
+支持 JWT 登录、作品增删改查、用户收藏、多对多标签、条件筛选与动态排序、统计图表，共 16 个 REST 接口 + 4 个页面。
 
 ---
 
@@ -51,7 +51,7 @@ Windows 用户也可以直接双击 `start.bat`。
 常用参数：`python run.py --port 9000` 换端口，`--host 0.0.0.0` 允许局域网访问。
 
 > **关于数据**：首次启动会自动在项目根目录创建空的 `acg.db` 并建表。
-> 上面的截图是本地录入 13 部作品后的效果，**演示数据没有随仓库提交** ——
+> 上面的截图是本地录入一批作品后的效果，**演示数据没有随仓库提交** ——
 > 你拿到的是干净的库，可以直接在网页上点「新增作品」录入。
 
 ---
@@ -61,7 +61,13 @@ Windows 用户也可以直接双击 `start.bat`。
 **作品管理**
 - 作品的增删改查，评分（0–10，前端星值展示）、短评、类型、状态、作者
 - 按类型 / 状态 / 标题模糊搜索，支持按 ID / 评分 / 添加时间排序，可升降序、分页
-- 随机推荐：从收藏中随机抽一部
+- 随机推荐：从全馆作品中随机抽一部
+
+**收藏**
+- 用户与作品多对多（`user_favorites` 关联表 + `(user_id, work_id)` 唯一约束）
+- 上传和收藏是两个独立动作：作品上传后即对所有人公开，收藏则是每个用户各自的私有列表
+- 列表页可切换「全部作品 / 我的收藏 / 我上传的」三种视角，同一个 `/works` 接口用 `scope` 参数区分
+- 收藏与取消收藏接口都做成**幂等**的，前端切换按钮连点不会报错
 
 **标签系统**
 - 标签与作品多对多（`work_tags` 关联表 + `(work_id, tag_id)` 唯一约束）
@@ -70,10 +76,12 @@ Windows 用户也可以直接双击 `start.bat`。
 **用户系统**
 - 注册 / 登录，密码用 bcrypt 加盐哈希存储，绝不落明文
 - JWT 签发与校验，受保护接口统一走 `Depends(get_current_user)`
+- 公开接口用 `Depends(get_optional_user)`：没登录也能浏览，登录了才额外返回"是否已收藏"
 
 **统计**
-- 收藏总量、平均评分、覆盖类型数、已完结数
+- 作品总量、平均评分、覆盖类型数、已完结数
 - 类型分布（环形图）、作品状态（柱状图）、评分分布（直方图）
+- 统计口径跟随列表的 `scope`，保证分页用的 `total` 和实际返回条数一致
 
 ---
 
@@ -152,20 +160,29 @@ catch-all 里显式挡掉 `api` 前缀：否则 `/api/typo` 会返回一段 HTML
 |---|---|---|---|
 | POST | `/api/register` | 注册 | 否 |
 | POST | `/api/login` | 登录，返回 JWT | 否 |
-| GET | `/api/works` | 作品列表（筛选 / 排序 / 分页） | 否 |
+| GET | `/api/works` | 作品列表（筛选 / 排序 / 分页 / 三种视角） | 见下方说明 |
 | POST | `/api/works` | 新增作品 | 是 |
 | GET | `/api/works/{id}` | 作品详情 | 否 |
 | PUT | `/api/works/{id}` | 更新作品 | 是 |
-| DELETE | `/api/works/{id}` | 删除作品 | 是 |
+| DELETE | `/api/works/{id}` | 删除作品（同时清掉其收藏记录） | 是 |
+| POST | `/api/works/{id}/favorite` | 收藏作品（幂等） | 是 |
+| DELETE | `/api/works/{id}/favorite` | 取消收藏（幂等） | 是 |
 | GET | `/api/works/random` | 随机推荐 | 否 |
-| GET | `/api/works/stats` | 统计汇总 | 否 |
+| GET | `/api/works/stats` | 统计汇总（口径跟随 `scope`） | 见下方说明 |
 | GET | `/api/works/{id}/tags` | 该作品的标签 | 否 |
 | POST | `/api/works/{id}/tags` | 给作品加标签 | 是 |
 | DELETE | `/api/works/{id}/tags/{tag_id}` | 移除作品上的标签 | 是 |
 | GET | `/api/works/tags/by-tags` | 按多个标签筛选作品 | 否 |
 | POST | `/api/tags` | 新建标签 | 是 |
 
-列表接口支持的查询参数：`type`、`status`、`title`（模糊匹配）、`skip`、`limit`、`sort_by`（`id` / `rating` / `created_at`）、`order`（`asc` / `desc`）。
+列表接口支持的查询参数：`type`、`status`、`title`（模糊匹配）、`scope`、`skip`、`limit`、`sort_by`（`id` / `rating` / `created_at`）、`order`（`asc` / `desc`）。
+
+`scope` 控制看哪一批作品：`all`（默认，全馆公开，**无需登录**）、`favorites`（我的收藏）、`mine`（我上传的）。
+后两者属于个人视角，必须带 token，否则返回 401。`/api/works/stats` 接受同样的 `scope`——
+统计口径和列表必须一致，否则前端拿 `total` 算出来的页码会和实际条数对不上。
+
+作品是**公开**的：谁都能看到所有人上传的作品，目前不做用户之间的权限隔离
+（`works.user_id` 已经记录了上传者，为以后加「只有作者能改/删」留好了位置）。
 
 ---
 

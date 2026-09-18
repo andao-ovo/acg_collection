@@ -3,8 +3,8 @@
     <!-- 页头 -->
     <div class="page-header">
       <div>
-        <h1 class="page-title">作品列表</h1>
-        <p class="page-subtitle">共 {{ total }} 部作品 · 发现并收藏你喜欢的动漫、漫画与小说</p>
+        <h1 class="page-title">{{ scopeTitle }}</h1>
+        <p class="page-subtitle">{{ scopeSubtitle }}</p>
       </div>
       <div class="header-actions">
         <el-button @click="surprise" :loading="surpriseLoading">
@@ -14,6 +14,19 @@
           <el-icon><Plus /></el-icon>&nbsp;新增作品
         </el-button>
       </div>
+    </div>
+
+    <!-- 可见范围切换：全馆作品是公开的，登录后才有"我的收藏 / 我上传的"这两个私人视角 -->
+    <div class="scope-bar" v-if="auth.isLoggedIn">
+      <el-radio-group v-model="scope" @change="handleScopeChange">
+        <el-radio-button
+          v-for="s in SCOPE_OPTIONS"
+          :key="s.value"
+          :value="s.value"
+        >
+          {{ s.label }}
+        </el-radio-button>
+      </el-radio-group>
     </div>
 
     <!-- 筛选卡片 -->
@@ -130,8 +143,23 @@
             </div>
           </div>
 
-          <!-- 右侧评分 -->
+          <!-- 右侧：收藏 + 评分 -->
           <div class="work-side">
+            <!-- .stop 阻止冒泡：否则点收藏会同时触发外层卡片的"进入详情" -->
+            <el-tooltip :content="work.is_favorited ? '取消收藏' : '收藏'" placement="top">
+              <el-button
+                link
+                class="fav-btn"
+                :class="{ 'is-fav': work.is_favorited }"
+                @click.stop="toggleFavorite(work)"
+              >
+                <el-icon :size="22">
+                  <StarFilled v-if="work.is_favorited" />
+                  <Star v-else />
+                </el-icon>
+              </el-button>
+            </el-tooltip>
+
             <div class="rating" v-if="work.rating != null">
               <span class="rating-num">{{ work.rating }}</span>
               <span class="rating-max">/10</span>
@@ -165,20 +193,29 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getWorks, getWorksStats, getRandomWork } from '@/api'
+import {
+  getWorks,
+  getWorksStats,
+  getRandomWork,
+  addFavorite,
+  removeFavorite,
+} from '@/api'
 import {
   WORK_TYPE_OPTIONS,
   STATUS_OPTIONS,
   SORT_FIELDS,
+  SCOPE_OPTIONS,
   typeInfo,
   statusInfo,
 } from '@/constants'
+import { useAuthStore } from '@/stores/auth'
 import WorkFormDialog from '@/components/WorkFormDialog.vue'
 
 const router = useRouter()
+const auth = useAuthStore()
 
 const loading = ref(false)
 const works = ref([])
@@ -196,6 +233,37 @@ const filters = reactive({
 const sortKey = ref('created_at')
 const sortOrder = ref('desc')
 
+// 可见范围：all 全馆公开 / favorites 我的收藏 / mine 我上传的
+const scope = ref('all')
+
+const scopeTitle = computed(() => ({
+  all: '作品列表',
+  favorites: '我的收藏',
+  mine: '我上传的',
+}[scope.value] || '作品列表'))
+
+const scopeSubtitle = computed(() => {
+  if (scope.value === 'favorites') return `共 ${total.value} 部收藏 · 只属于你的私人收藏夹`
+  if (scope.value === 'mine') return `共 ${total.value} 部作品 · 你上传到馆藏的作品`
+  return `共 ${total.value} 部作品 · 发现并收藏你喜欢的动漫、漫画、小说与影视`
+})
+
+function handleScopeChange() {
+  filters.page = 1
+  fetchWorks()
+}
+
+// 退出登录时把私人视角切回全馆，否则会拿旧 scope 去请求一个需要登录的接口
+watch(
+  () => auth.isLoggedIn,
+  (loggedIn) => {
+    if (!loggedIn && scope.value !== 'all') {
+      scope.value = 'all'
+      handleScopeChange()
+    }
+  }
+)
+
 async function fetchWorks() {
   loading.value = true
   try {
@@ -204,6 +272,7 @@ async function fetchWorks() {
       limit: filters.limit,
       sort_by: sortKey.value || 'id',
       order: sortOrder.value,
+      scope: scope.value,
     }
     if (filters.title) params.title = filters.title
     if (filters.type) params.type = filters.type
@@ -211,13 +280,42 @@ async function fetchWorks() {
 
     const [list, stats] = await Promise.all([
       getWorks(params),
-      getWorksStats().catch(() => null),
+      // 统计必须用同一个 scope，否则 total 是另一个口径的数字，页码就错位了
+      getWorksStats({ scope: scope.value }).catch(() => null),
     ])
     works.value = list
     // 用统计接口的 total 驱动分页（/works 本身不返回总数）
     total.value = stats?.total ?? works.value.length
   } finally {
     loading.value = false
+  }
+}
+
+// ---------- 收藏 / 取消收藏 ----------
+async function toggleFavorite(work) {
+  if (!auth.isLoggedIn) {
+    ElMessage.warning('登录后才能收藏作品')
+    router.push({ name: 'login' })
+    return
+  }
+
+  const next = !work.is_favorited
+  // 乐观更新：先改本地状态，按钮立刻响应；请求失败再回滚
+  work.is_favorited = next
+  try {
+    if (next) {
+      await addFavorite(work.id)
+    } else {
+      await removeFavorite(work.id)
+    }
+    ElMessage.success(next ? '已加入收藏' : '已取消收藏')
+    // 在"我的收藏"视图里取消收藏，这部作品就该从当前列表消失
+    // （同时 total 也要跟着变，所以直接重新拉一次）
+    if (!next && scope.value === 'favorites') {
+      fetchWorks()
+    }
+  } catch (e) {
+    work.is_favorited = !next
   }
 }
 
@@ -268,6 +366,12 @@ function openCreate() {
 
 function handleSaved() {
   formVisible.value = false
+  // 在"我的收藏"里新增作品时，新作品并不会自动进收藏夹，列表刷新后看不到它，
+  // 看起来像没保存成功。这里切回全馆视图，保证"新增完立刻能看到"
+  if (scope.value === 'favorites') {
+    scope.value = 'all'
+    filters.page = 1
+  }
   fetchWorks()
 }
 
@@ -298,6 +402,10 @@ onMounted(fetchWorks)
 .header-actions {
   display: flex;
   gap: 10px;
+}
+
+.scope-bar {
+  margin-bottom: 14px;
 }
 
 .filter-card {
@@ -397,9 +505,24 @@ onMounted(fetchWorks)
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 90px;
+  gap: 12px;
+  min-width: 130px;
   border-left: 1px solid #f0f2f9;
   padding-left: 16px;
+}
+/* 收藏星标：未收藏是灰色描边，收藏后变金色实心 */
+.fav-btn {
+  padding: 0;
+  height: auto;
+  color: #c8ccd8;
+  transition: color 0.2s, transform 0.15s;
+}
+.fav-btn:hover {
+  color: #f7b500;
+  transform: scale(1.12);
+}
+.fav-btn.is-fav {
+  color: #f7b500;
 }
 .rating {
   display: flex;

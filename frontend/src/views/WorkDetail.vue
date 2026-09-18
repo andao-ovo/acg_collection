@@ -54,13 +54,28 @@
               />
             </div>
 
-            <div class="head-actions" v-if="auth.isLoggedIn">
-              <el-button type="primary" plain @click="openEdit">
-                <el-icon><Edit /></el-icon>&nbsp;编辑
+            <div class="head-actions">
+              <!-- 收藏按钮对未登录用户也显示：点了引导去登录，比直接藏起来更好懂 -->
+              <el-button
+                :type="work.is_favorited ? 'warning' : 'default'"
+                :plain="!work.is_favorited"
+                :loading="favLoading"
+                @click="toggleFavorite"
+              >
+                <el-icon>
+                  <StarFilled v-if="work.is_favorited" />
+                  <Star v-else />
+                </el-icon>&nbsp;{{ work.is_favorited ? '已收藏' : '收藏' }}
               </el-button>
-              <el-button type="danger" plain @click="handleDelete">
-                <el-icon><Delete /></el-icon>&nbsp;删除
-              </el-button>
+
+              <template v-if="auth.isLoggedIn">
+                <el-button type="primary" plain @click="openEdit">
+                  <el-icon><Edit /></el-icon>&nbsp;编辑
+                </el-button>
+                <el-button type="danger" plain @click="handleDelete">
+                  <el-icon><Delete /></el-icon>&nbsp;删除
+                </el-button>
+              </template>
             </div>
           </div>
         </div>
@@ -127,7 +142,16 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getWork, getWorkTags, deleteWork, addTagToWork, removeTagFromWork, createTag } from '@/api'
+import {
+  getWork,
+  getWorkTags,
+  deleteWork,
+  addTagToWork,
+  removeTagFromWork,
+  createTag,
+  addFavorite,
+  removeFavorite,
+} from '@/api'
 import { typeInfo, statusInfo } from '@/constants'
 import { useAuthStore } from '@/stores/auth'
 import WorkFormDialog from '@/components/WorkFormDialog.vue'
@@ -145,6 +169,7 @@ const showAddTag = ref(false)
 const newTagName = ref('')
 const newTagCategory = ref('')
 const tagLoading = ref(false)
+const favLoading = ref(false)
 
 async function fetchDetail() {
   loading.value = true
@@ -164,6 +189,29 @@ async function fetchDetail() {
 
 function openEdit() {
   editVisible.value = true
+}
+
+// ---------- 收藏 / 取消收藏 ----------
+async function toggleFavorite() {
+  if (!auth.isLoggedIn) {
+    ElMessage.warning('登录后才能收藏作品')
+    router.push({ name: 'login' })
+    return
+  }
+
+  const next = !work.value.is_favorited
+  favLoading.value = true
+  try {
+    if (next) {
+      await addFavorite(work.value.id)
+    } else {
+      await removeFavorite(work.value.id)
+    }
+    work.value.is_favorited = next
+    ElMessage.success(next ? '已加入收藏' : '已取消收藏')
+  } finally {
+    favLoading.value = false
+  }
 }
 
 async function onEdited() {

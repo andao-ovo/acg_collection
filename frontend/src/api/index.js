@@ -11,7 +11,13 @@ export const createWork = (data) => http.post('/works', data)
 export const updateWork = (id, data) => http.put(`/works/${id}`, data)
 export const deleteWork = (id) => http.delete(`/works/${id}`)
 export const getRandomWork = () => http.get('/works/random')
-export const getWorksStats = () => http.get('/works/stats')
+// scope 决定统计口径（all / favorites / mine），必须和 getWorks 传的一致，
+// 否则列表页用 total 算出来的页码会和实际条数对不上
+export const getWorksStats = (params) => http.get('/works/stats', { params })
+
+// ---------- 收藏 ----------
+export const addFavorite = (id) => http.post(`/works/${id}/favorite`)
+export const removeFavorite = (id) => http.delete(`/works/${id}/favorite`)
 
 // ---------- 标签 ----------
 export const getWorkTags = (id) => http.get(`/works/${id}/tags`)

@@ -5,13 +5,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from sqlalchemy import func
+from sqlalchemy import func, select
 from pydantic import BaseModel
 
 from database import engine, Base, get_db
-from models import Work, Tag, WorkTag, User
+from models import Work, Tag, WorkTag, User, UserFavorite
 from schemas import WorkCreate, WorkOut
-from auth import hash_password, verify_password, create_token, get_current_user
+from auth import hash_password, verify_password, create_token, get_current_user, get_optional_user
 
 import time
 
@@ -115,6 +115,61 @@ if _probe_redis():
 else:
     print("[缓存] 未检测到 Redis，已自动降级为直连数据库（功能不受影响，仅少了缓存）", flush=True)
 
+
+# ---------- 作品可见范围（scope）----------
+# 作品本身是公开的：谁上传的都能被所有人看到，暂时不做用户之间的权限隔离。
+# scope 控制的是"这一屏想看哪一批"：
+#   all       —— 全馆公开作品（默认，不需要登录）
+#   favorites —— 我收藏的（需要登录）
+#   mine      —— 我上传的（需要登录）
+SCOPES = ("all", "favorites", "mine")
+
+
+def _check_scope(scope: str) -> None:
+    if scope not in SCOPES:
+        raise HTTPException(status_code=400, detail="scope 只能是 all / favorites / mine")
+
+
+def _scope_conditions(scope: str, user, db: Session):
+    """把 scope 翻译成一组过滤条件。
+
+    返回"条件列表"而不是拼好的 Query，是为了让列表接口和统计接口共用同一套口径 ——
+    两边的 total 必须一致，否则前端的页码会错位。
+    """
+    if scope == "favorites":
+        # 用 IN 子查询而不是 join：统计接口要对同一条件做 count / avg / group by，
+        # 子查询在这些聚合里都能直接复用，不会和 group by 相互干扰
+        return [Work.id.in_(
+            select(UserFavorite.work_id).where(UserFavorite.user_id == user.id)
+        )]
+    if scope == "mine":
+        return [Work.user_id == user.id]
+    return []
+
+
+def _attach_favorite_state(works, user, db: Session):
+    """给作品对象挂上 is_favorited，供 WorkOut 序列化输出。
+
+    is_favorited 不是 works 表里的字段，而是"当前用户 × 这部作品"临时算出来的，
+    所以只能在这里按当前登录用户挂上去；未登录时一律 False，连库都不用查。
+    """
+    ids = [w.id for w in works]
+    if user is None or not ids:
+        for work in works:
+            work.is_favorited = False
+        return works
+
+    favorite_ids = {
+        row[0]
+        for row in db.query(UserFavorite.work_id)
+        .filter(UserFavorite.user_id == user.id, UserFavorite.work_id.in_(ids))
+        .all()
+    }
+    for work in works:
+        work.is_favorited = work.id in favorite_ids
+    return works
+
+
 # 注册请求模型
 class UserCreate(BaseModel):
     username: str
@@ -175,7 +230,8 @@ def create_work(
     user: User = Depends(get_current_user)   
 ):
     try:
-        db_work = Work(**work.model_dump(exclude={"tag_ids"}))
+        # user_id 由服务端从 token 里取，不接受客户端传入 —— 否则可以伪造成别人上传的
+        db_work = Work(**work.model_dump(exclude={"tag_ids"}), user_id=user.id)
         db.add(db_work)
         db.flush()
         for tag_id in work.tag_ids:
@@ -188,29 +244,43 @@ def create_work(
 
     # 缓存失效放在事务边界之外：Redis 出问题不该影响已经提交的数据
     cache_delete("works_stats")
+    # 刚上传的作品不会自己出现在收藏里：上传和收藏是两个独立的动作
+    db_work.is_favorited = False
     return db_work
 
-# ---------- 查询作品列表（不需要认证）----------
+# ---------- 查询作品列表（公开；scope=favorites/mine 时需要认证）----------
+# 用 get_optional_user 而不是 get_current_user：默认的全馆浏览必须保持匿名可用，
+# 只有切到"我的收藏/我上传的"时才要求登录，由 _check_scope 之后手动判 401
 @api.get("/works", response_model=List[WorkOut])
 def get_work(
     type: Optional[str] = None,
     status: Optional[str] = None,
     title: Optional[str] = None,
+    scope: str = "all",
     skip: int = 0,
     limit: int = 10,
     sort_by: str = "id",
     order: str = "desc",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user)
 ):
+    _check_scope(scope)
+    if scope in ("favorites", "mine") and user is None:
+        raise HTTPException(status_code=401, detail="该筛选需要登录")
+
     work_query = db.query(Work)
-    
+
+    conditions = _scope_conditions(scope, user, db)
+    if conditions:
+        work_query = work_query.filter(*conditions)
+
     if type:
         work_query = work_query.filter(Work.type == type)
     if status:
         work_query = work_query.filter(Work.status == status)
     if title:
         work_query = work_query.filter(Work.title.contains(title))
-    
+
     allowed_sort_fields = {"id", "rating", "created_at"}
     if sort_by not in allowed_sort_fields:
         sort_by = "id"
@@ -220,41 +290,121 @@ def get_work(
     work_query = work_query.order_by(sort_column)
     work_query = work_query.offset(skip).limit(limit)
 
-    return work_query.all()
+    works = work_query.all()
+    return _attach_favorite_state(works, user, db)
 
 # ---------- 随机推荐（不需要认证）----------
 # 注意:固定路径接口必须定义在 /works/{work_id} 之前,否则会被当成 work_id 拦截
 @api.get("/works/random", response_model=WorkOut)
-def random_work(db: Session = Depends(get_db)):
+def random_work(
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user)
+):
     work = db.query(Work).order_by(func.random()).first()
     if not work:
         raise HTTPException(status_code=404, detail="No works found")
-    return work
+    return _attach_favorite_state([work], user, db)[0]
 
-# ---------- 统计（不需要认证）----------
+# ---------- 统计（公开；scope=favorites/mine 时需要认证）----------
+# 统计口径必须和 /works 保持一致（同样的 scope），否则前端用 total 算出来的
+# 页码和实际返回的条数会对不上
 @api.get("/works/stats")
-def get_stats(db: Session = Depends(get_db)):
-    cached = cache_get("works_stats")
-    if cached is not None:
-        return cached
-    total = db.query(func.count(Work.id)).scalar()
-    avg_rating = db.query(func.avg(Work.rating)).scalar()
-    type_counts = db.query(Work.type, func.count(Work.id)).group_by(Work.type).all()
+def get_stats(
+    scope: str = "all",
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user)
+):
+    _check_scope(scope)
+    if scope in ("favorites", "mine") and user is None:
+        raise HTTPException(status_code=401, detail="该筛选需要登录")
+
+    # 全馆统计人人一样，缓存一份即可；favorites/mine 是"每人一份"，
+    # 缓存键必须带上 user_id 才有意义 —— 沿用全局键 "works_stats" 会让 A 读到 B 的数字。
+    # 这点收益不值得引入"按用户失效"的复杂度，所以个人统计直接查库。
+    if scope == "all":
+        cached = cache_get("works_stats")
+        if cached is not None:
+            return cached
+
+    conditions = _scope_conditions(scope, user, db)
+    total_query = db.query(func.count(Work.id))
+    avg_query = db.query(func.avg(Work.rating))
+    type_query = db.query(Work.type, func.count(Work.id))
+    if conditions:
+        total_query = total_query.filter(*conditions)
+        avg_query = avg_query.filter(*conditions)
+        type_query = type_query.filter(*conditions)
+
     result = {
-        "total": total,
-        "avg_rating": avg_rating,
-        "type_breakdown": dict(type_counts)
+        "total": total_query.scalar(),
+        "avg_rating": avg_query.scalar(),
+        "type_breakdown": dict(type_query.group_by(Work.type).all())
     }
-    cache_set("works_stats", result)
+
+    if scope == "all":
+        cache_set("works_stats", result)
     return result
 
 # ---------- 查询单个作品（不需要认证）----------
 @api.get("/works/{work_id}", response_model=WorkOut)
-def get_work_by_id(work_id: int, db: Session = Depends(get_db)):
+def get_work_by_id(
+    work_id: int,
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user)
+):
     work = db.query(Work).filter(Work.id == work_id).first()
     if not work:
         raise HTTPException(status_code=404, detail="Work not found")
-    return work
+    return _attach_favorite_state([work], user, db)[0]
+
+# ---------- 收藏作品（需要认证）----------
+# 做成幂等的：重复收藏直接返回成功，不报 400。
+# 前端是个"收藏/取消"切换按钮，网络慢时用户容易连点两次，
+# 幂等能保证连点不会弹错误提示（对比 add_tag 那种"重复即报错"的场景，
+# 这里的语义是"让状态变成已收藏"，而不是"新建一条记录"）
+@api.post("/works/{work_id}/favorite")
+def add_favorite(
+    work_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    work = db.query(Work).filter(Work.id == work_id).first()
+    if not work:
+        raise HTTPException(status_code=404, detail="Work not found")
+
+    existing = (
+        db.query(UserFavorite)
+        .filter(UserFavorite.user_id == user.id, UserFavorite.work_id == work_id)
+        .first()
+    )
+    if existing:
+        return {"message": "已在收藏中", "is_favorited": True}
+
+    db.add(UserFavorite(user_id=user.id, work_id=work_id))
+    db.commit()
+    # 收藏不影响全馆统计（total / avg_rating / 类型分布都不含收藏数），
+    # 所以这里不需要动 "works_stats" 缓存
+    return {"message": "收藏成功", "is_favorited": True}
+
+# ---------- 取消收藏（需要认证）----------
+# 同样幂等：没收藏过也返回成功，前端不必先查状态再删
+@api.delete("/works/{work_id}/favorite")
+def remove_favorite(
+    work_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    favorite = (
+        db.query(UserFavorite)
+        .filter(UserFavorite.user_id == user.id, UserFavorite.work_id == work_id)
+        .first()
+    )
+    if not favorite:
+        return {"message": "尚未收藏该作品", "is_favorited": False}
+
+    db.delete(favorite)
+    db.commit()
+    return {"message": "已取消收藏", "is_favorited": False}
 
 # ---------- 显示单个作品的标签（不需要认证）----------
 @api.get("/works/{work_id}/tags")
@@ -328,7 +478,8 @@ def delete_tag(
 @api.get("/works/tags/by-tags")
 def get_works_by_tags(
     tag_ids: str = Query(..., description="逗号分隔的标签ID，如 1,3,5"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user)
 ):
     tag_id_list = [int(x.strip()) for x in tag_ids.split(",")]
     work_ids = (
@@ -342,7 +493,7 @@ def get_works_by_tags(
     if not work_id_list:
         return []
     works = db.query(Work).filter(Work.id.in_(work_id_list)).all()
-    return works
+    return _attach_favorite_state(works, user, db)
 
 # ---------- 更新作品（需要认证）----------
 @api.put("/works/{work_id}", response_model=WorkOut)
@@ -378,7 +529,12 @@ def delete_work(
     db_work = db.query(Work).filter(Work.id == work_id).first()
     if not db_work:
         raise HTTPException(status_code=404, detail="Work not found")
-    
+
+    # 先把收藏关联删掉：SQLite 默认不强制外键约束（不打开 PRAGMA foreign_keys），
+    # 光删作品会留下指向"已经不存在的作品"的收藏记录。
+    # 放在同一个事务里提交，避免出现"作品删了但收藏没删干净"的中间状态
+    db.query(UserFavorite).filter(UserFavorite.work_id == work_id).delete()
+
     db.delete(db_work)
     db.commit()
     cache_delete("works_stats")

@@ -66,5 +66,23 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户不存在"
         )
-    
+
     return user
+
+# 可选登录：给"公开接口，但登录后能多看到一点信息"的场景用（如作品列表附带收藏状态）。
+# 与 get_current_user 的唯一区别是：没带 token 或 token 无效时返回 None，而不是抛 401。
+# 注意：token 无效时也返回 None 是有意的 —— 对公开接口来说，"没登录"和"登录过期了"
+# 都按匿名处理即可，前端在需要登录的操作上自然会拿到 401。
+def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    if credentials is None:
+        return None
+
+    try:
+        user_id = verify_token(credentials.credentials)
+    except JWTError:
+        return None
+
+    return db.query(User).filter(User.id == user_id).first()
